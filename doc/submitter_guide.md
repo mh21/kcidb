@@ -271,20 +271,24 @@ Example: `"2020-08-14T23:08:10.008000+00:00"`
 #### Tests
 
 ##### `status`
-The test status string, one of the following.
+The test status string, one of the following:
 
-* `FAIL` - the test has failed, the tested code is faulty.
-* `ERROR` - the test is faulty, the status of the tested code is unknown.
-* `PASS` - the test has passed, the tested code is correct.
-* `DONE` - the test has finished successfully, the status of the tested code
-  is unknown.
-* `SKIP` - the test wasn't executed, the status of the tested code is unknown.
+* "FAIL" - the test completed and reported the tested code as faulty.
+* "ERROR" - the test didn't complete due to a failure in its code, and the
+  status of the tested code is unknown.
+* "MISS" - the test didn't run due to a failure in the test harness, and the
+  status of both the test and the tested code is unknown.
+* "PASS" - the test completed and reported the tested code as correct.
+* "DONE" - the test completed and had not reported the status of the tested
+  code, but, for example, produced a performance measurement result.
+* "SKIP" - the test did not run or complete, because it was not applicable,
+  and the status of both the test and the tested code is unknown.
 
 The status names above are listed in priority order (highest to lowest), which
-could be used for producing a summary status for a collection of test runs,
-e.g. for all testing done on a build, based on results of executed test
-suites. The summary status would be the highest priority status across all
-test runs in a collection.
+can be used to produce a summary status for a collection of test runs.
+
+For example, the summary status for all testing done on a build would be the
+highest-priority status across all its tests.
 
 Example: `"FAIL"`
 
