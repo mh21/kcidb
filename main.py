@@ -161,6 +161,69 @@ def get_spool_client():
         _SPOOL_CLIENT = kcidb.monitor.spool.Client(collection_path)
     return _SPOOL_CLIENT
 
+def extract_urls(data):
+    """
+    Extract URLs we want to cache from I/O data.
+
+    Args:
+        data: The I/O data to extract URLs from.
+
+    Returns:
+        An iterator returning (unique) extracted URLs one by one.
+    """
+    OBJECT_SPECS = {
+        'checkouts': {
+            'patchset_files': [{'url': True}],
+        },
+        'builds': {
+            'input_files': [{'url': True}],
+            'output_files': [{'url': True}],
+            'config_url': True,
+            'log_url': True,
+        },
+        'tests': {
+            'output_files': [{'url': True}],
+            'log_url': True,
+            'environment': {
+                'misc': {
+                    'rootfs_url': True,
+                },
+            },
+        },
+    }
+    
+    seen_urls = set()  # To track seen URLs
+
+    def extract_fields(spec, data):
+        tuples = []
+
+        if spec is True:
+            return [(tuple(), data)]
+        if isinstance(spec, dict) and isinstance(data, dict):
+            for obj_type, obj_spec in spec.items():
+                obj = data.get(obj_type)
+                if obj is not None:
+                    inner_tuples = extract_fields(obj_spec, obj)
+                    # prefix the path from inner tuples with obj_type
+                    for field_path, field_value in inner_tuples:
+                        tuples.append(((obj_type,) + field_path, field_value))
+        elif isinstance(spec, list) and isinstance(data, list):
+            assert len(spec) == 1
+            obj_spec = spec[0]
+            for obj in data:
+                tuples += extract_fields(obj_spec, obj)
+        return tuples
+
+
+    for obj_type, obj_spec in OBJECT_SPECS.items():
+        for obj in data.get(obj_type, []):
+            url_tuples = extract_fields(obj_spec, obj)
+            for _, url in url_tuples:
+                if url not in seen_urls:  # Check if URL is unique
+                    seen_urls.add(url)
+                    LOGGER.info("Before extraction urls are %s", url)
+                    yield url
+
 
 # pylint: disable=unused-argument
 
@@ -206,6 +269,15 @@ def kcidb_load_queue(event, context):
     LOGGER.debug("Loading %u objects...", obj_num)
     db_client.load(data)
     LOGGER.info("Loaded %u objects", obj_num)
+    
+    # Extract and publish URLs
+    url_publisher = kcidb.mq.URLListPublisher(
+        project_id=os.environ["GCP_PROJECT"],
+        topic_name=os.environ["KCIDB_UPDATED_URLS_TOPIC"]
+    )
+    for urls in kcidb.misc.isliced(extract_urls(data), 64):
+        LOGGER.info("Extracted urls are %s", list(urls))
+        url_publisher.publish(list(urls))
 
     # Acknowledge all the loaded messages
     for msg in msgs:
