@@ -127,6 +127,26 @@ class Connection(AbstractConnection):
             finally:
                 cursor.close()
 
+    def get_current_time(self):
+        """
+        Get the current time from the database server.
+
+        Returns:
+            A timezone-aware datetime object representing the current
+            time on the database server.
+        """
+        # Oh, but sqlite3 connection is, pylint: disable=not-context-manager
+        with self:
+            cursor = self.cursor()
+            try:
+                cursor.execute("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')")
+                return datetime.datetime.strptime(
+                    cursor.fetchone()[0],
+                    '%Y-%m-%d %H:%M:%S.%f'
+                ).replace(tzinfo=datetime.timezone.utc)
+            finally:
+                cursor.close()
+
     def get_last_modified(self):
         """
         Get the time the data in the connected database was last modified.
