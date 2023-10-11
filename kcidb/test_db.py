@@ -5,6 +5,7 @@ import textwrap
 import time
 import datetime
 import json
+from copy import deepcopy
 from itertools import permutations
 import pytest
 import kcidb
@@ -17,7 +18,7 @@ def test_schemas_main():
     """Check kcidb-db-schemas works"""
     argv = ["kcidb.db.schemas_main", "-d", "sqlite::memory:"]
     assert_executes("", *argv,
-                    stdout_re=r"4\.0: 4\.0\n4\.1: 4\.2\n")
+                    stdout_re=r"4\.0: 4\.0\n4\.1: 4\.2\n4\.2: 4\.3\n")
 
 
 def test_reset(clean_database):
@@ -1154,5 +1155,39 @@ def test_cleanup(clean_database):
 def test_purge(empty_database):
     """Test the purge() method behaves as documented"""
     client = empty_database
-    # No databases support purging yet
-    assert not client.purge(None)
+
+    # If this is a database and schema which *should* support purging
+    if isinstance(client.driver, (kcidb.db.bigquery.Driver,
+                                  kcidb.db.postgresql.Driver,
+                                  kcidb.db.sqlite.Driver)) and \
+            client.driver.get_schema()[0] >= (4, 2):
+        io_data_1 = deepcopy(COMPREHENSIVE_IO_DATA)
+        io_data_2 = deepcopy(COMPREHENSIVE_IO_DATA)
+        for obj_list_name in kcidb.io.SCHEMA.graph:
+            if obj_list_name:
+                for obj in io_data_2[obj_list_name]:
+                    obj["id"] = "origin:2"
+
+        assert client.purge(None)
+        client.load(io_data_1)
+        assert client.dump(with_metadata=False) == io_data_1
+        after_first_load = client.get_current_time()
+        time.sleep(1)
+        client.load(io_data_2)
+
+        # Check both datasets are in the database
+        # regardless of the object order
+        dump = client.dump(with_metadata=False)
+        for io_data in (io_data_1, io_data_2):
+            for obj_list_name in kcidb.io.SCHEMA.graph:
+                if obj_list_name:
+                    assert obj_list_name in dump
+                    for obj in io_data[obj_list_name]:
+                        assert obj in dump[obj_list_name]
+
+        assert client.purge(after_first_load)
+        assert client.dump(with_metadata=False) == io_data_2
+        assert client.purge(client.get_current_time())
+        assert client.dump() == kcidb.io.SCHEMA.new()
+    else:
+        assert not client.purge(None)
