@@ -169,6 +169,19 @@ class Connection(AbstractConnection):
         except psycopg2.errors.UndefinedFunction:
             return None
 
+    def get_current_time(self):
+        """
+        Get the current time from the database server.
+
+        Returns:
+            A timezone-aware datetime object representing the current
+            time on the database server.
+        """
+        # Oh, but the connection is, pylint: disable=not-context-manager
+        with self, self.cursor() as cursor:
+            cursor.execute("SELECT CURRENT_TIMESTAMP")
+            return cursor.fetchone()[0]
+
     def get_last_modified(self):
         """
         Get the time the data in the connected database was last modified.
@@ -193,64 +206,76 @@ class Schema(AbstractSchema):
     # The I/O schema the database schema supports
     io = io.schema.V4_0
 
-    # A map of table names to table definitions
-    TABLES = dict(
-        checkouts=Table({
-            "id": TextColumn(constraint=Constraint.PRIMARY_KEY),
-            "origin": TextColumn(constraint=Constraint.NOT_NULL),
-            "tree_name": TextColumn(),
-            "git_repository_url": TextColumn(),
-            "git_commit_hash": TextColumn(),
-            "git_commit_name": TextColumn(),
-            "git_repository_branch": TextColumn(),
-            "patchset_files": JSONColumn(),
-            "patchset_hash": TextColumn(),
-            "message_id": TextColumn(),
-            "comment": TextColumn(),
-            "start_time": TimestampColumn(),
-            "contacts": JSONColumn(),
-            "log_url": TextColumn(),
-            "log_excerpt": VarcharColumn(16384),
-            "valid": BoolColumn(),
-            "misc": JSONColumn(),
-        }),
-        builds=Table({
-            "checkout_id": TextColumn(constraint=Constraint.NOT_NULL),
-            "id": TextColumn(constraint=Constraint.PRIMARY_KEY),
-            "origin": TextColumn(constraint=Constraint.NOT_NULL),
-            "comment": TextColumn(),
-            "start_time": TimestampColumn(),
-            "duration": FloatColumn(),
-            "architecture": TextColumn(),
-            "command": TextColumn(),
-            "compiler": TextColumn(),
-            "input_files": JSONColumn(),
-            "output_files": JSONColumn(),
-            "config_name": TextColumn(),
-            "config_url": TextColumn(),
-            "log_url": TextColumn(),
-            "log_excerpt": VarcharColumn(16384),
-            "valid": BoolColumn(),
-            "misc": JSONColumn(),
-        }),
-        tests=Table({
-            "build_id": TextColumn(constraint=Constraint.NOT_NULL),
-            "id": TextColumn(constraint=Constraint.PRIMARY_KEY),
-            "origin": TextColumn(constraint=Constraint.NOT_NULL),
-            "environment.comment": TextColumn(),
-            "environment.misc": JSONColumn(),
-            "path": TextColumn(),
-            "comment": TextColumn(),
-            "log_url": TextColumn(),
-            "log_excerpt": VarcharColumn(16384),
-            "status": TextColumn(),
-            "waived": BoolColumn(),
-            "start_time": TimestampColumn(),
-            "duration": FloatColumn(),
-            "output_files": JSONColumn(),
-            "misc": JSONColumn()
-        }),
+    # A map of table names and Table constructor arguments
+    # For use by descendants
+    TABLES_ARGS = dict(
+        checkouts=dict(
+            columns={
+                "id": TextColumn(constraint=Constraint.PRIMARY_KEY),
+                "origin": TextColumn(constraint=Constraint.NOT_NULL),
+                "tree_name": TextColumn(),
+                "git_repository_url": TextColumn(),
+                "git_commit_hash": TextColumn(),
+                "git_commit_name": TextColumn(),
+                "git_repository_branch": TextColumn(),
+                "patchset_files": JSONColumn(),
+                "patchset_hash": TextColumn(),
+                "message_id": TextColumn(),
+                "comment": TextColumn(),
+                "start_time": TimestampColumn(),
+                "contacts": JSONColumn(),
+                "log_url": TextColumn(),
+                "log_excerpt": VarcharColumn(16384),
+                "valid": BoolColumn(),
+                "misc": JSONColumn(),
+            }
+        ),
+        builds=dict(
+            columns={
+                "checkout_id": TextColumn(constraint=Constraint.NOT_NULL),
+                "id": TextColumn(constraint=Constraint.PRIMARY_KEY),
+                "origin": TextColumn(constraint=Constraint.NOT_NULL),
+                "comment": TextColumn(),
+                "start_time": TimestampColumn(),
+                "duration": FloatColumn(),
+                "architecture": TextColumn(),
+                "command": TextColumn(),
+                "compiler": TextColumn(),
+                "input_files": JSONColumn(),
+                "output_files": JSONColumn(),
+                "config_name": TextColumn(),
+                "config_url": TextColumn(),
+                "log_url": TextColumn(),
+                "log_excerpt": VarcharColumn(16384),
+                "valid": BoolColumn(),
+                "misc": JSONColumn(),
+            }
+        ),
+        tests=dict(
+            columns={
+                "build_id": TextColumn(constraint=Constraint.NOT_NULL),
+                "id": TextColumn(constraint=Constraint.PRIMARY_KEY),
+                "origin": TextColumn(constraint=Constraint.NOT_NULL),
+                "environment.comment": TextColumn(),
+                "environment.misc": JSONColumn(),
+                "path": TextColumn(),
+                "comment": TextColumn(),
+                "log_url": TextColumn(),
+                "log_excerpt": VarcharColumn(16384),
+                "status": TextColumn(),
+                "waived": BoolColumn(),
+                "start_time": TimestampColumn(),
+                "duration": FloatColumn(),
+                "output_files": JSONColumn(),
+                "misc": JSONColumn()
+            }
+        ),
     )
+
+    # A map of table names and schemas
+    TABLES = {
+        name: Table(**args) for name, args in TABLES_ARGS.items()
+    }
 
     # Queries and their columns for each type of raw object-oriented data.
     # Both should have columns in the same order.
@@ -521,13 +546,15 @@ class Schema(AbstractSchema):
             for name, schema in self.TABLES.items():
                 cursor.execute(schema.format_delete(name))
 
-    def dump_iter(self, objects_per_report):
+    def dump_iter(self, objects_per_report, with_metadata):
         """
         Dump all data from the database in object number-limited chunks.
 
         Args:
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be dumped as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the I/O
@@ -536,14 +563,16 @@ class Schema(AbstractSchema):
         """
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
 
         obj_num = 0
         data = self.io.new()
         with self.conn, self.conn.cursor() as cursor:
             for table_name, table_schema in self.TABLES.items():
                 obj_list = None
-                cursor.execute(table_schema.format_dump(table_name))
-                for obj in table_schema.unpack_iter(cursor):
+                cursor.execute(table_schema.format_dump(table_name,
+                                                        with_metadata))
+                for obj in table_schema.unpack_iter(cursor, with_metadata):
                     if obj_list is None:
                         obj_list = []
                         data[table_name] = obj_list
@@ -564,7 +593,8 @@ class Schema(AbstractSchema):
             yield data
 
     # We can live with this for now, pylint: disable=too-many-arguments
-    def query_iter(self, ids, children, parents, objects_per_report):
+    def query_iter(self, ids, children, parents, objects_per_report,
+                   with_metadata):
         """
         Match and fetch objects from the database, in object number-limited
         chunks.
@@ -579,6 +609,8 @@ class Schema(AbstractSchema):
                                 matched as well.
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be fetched as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the I/O
@@ -595,6 +627,7 @@ class Schema(AbstractSchema):
                    for k, v in ids.items())
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
 
         # Build a dictionary of object list (table) names and tuples
         # containing a SELECT statement and the list of its parameters,
@@ -668,14 +701,17 @@ class Schema(AbstractSchema):
             for obj_list_name, query in obj_list_queries.items():
                 table_schema = self.TABLES[obj_list_name]
                 cursor.execute(
-                    f"SELECT {table_schema.columns_list}\n"
+                    "SELECT " + ", ".join(
+                        c.name for c in table_schema.columns.values()
+                        if with_metadata or not c.schema.metadata_expr
+                    ) + "\n" +
                     f"FROM {obj_list_name} INNER JOIN (\n" +
                     textwrap.indent(query[0], " " * 4) +
                     ") AS ids USING(id)\n",
                     query[1]
                 )
                 obj_list = None
-                for obj in table_schema.unpack_iter(cursor):
+                for obj in table_schema.unpack_iter(cursor, with_metadata):
                     if obj_list is None:
                         obj_list = []
                         data[obj_list_name] = obj_list
@@ -812,31 +848,40 @@ class Schema(AbstractSchema):
                 query_parameters = [p for q in queries for p in q[1]]
                 cursor.execute(query_string, query_parameters)
                 objs[obj_type.name] = list(
-                    oo_query["schema"].unpack_iter(cursor, drop_null=False)
+                    oo_query["schema"].unpack_iter(cursor,
+                                                   with_metadata=False,
+                                                   drop_null=False)
                 )
 
         assert LIGHT_ASSERTS or orm.data.SCHEMA.is_valid(objs)
         return objs
 
-    def load(self, data):
+    def load(self, data, with_metadata):
         """
         Load data into the database.
 
         Args:
-            data:   The JSON data to load into the database.
-                    Must adhere to the I/O version of the database schema.
+            data:           The JSON data to load into the database. Must
+                            adhere to the I/O version of the database schema.
+            with_metadata:  True if any metadata in the data should
+                            also be loaded into the database. False if it
+                            should be discarded and the database should
+                            generate its metadata itself.
         """
         assert self.io.is_compatible_directly(data)
         assert LIGHT_ASSERTS or self.io.is_valid_exactly(data)
+        assert isinstance(with_metadata, bool)
         with self.conn, self.conn.cursor() as cursor:
             for table_name, table_schema in self.TABLES.items():
                 if table_name in data:
                     psycopg2.extras.execute_batch(
                         cursor,
                         table_schema.format_insert(
-                            table_name, self.conn.load_prio_db
+                            table_name, self.conn.load_prio_db,
+                            with_metadata
                         ),
-                        table_schema.pack_iter(data[table_name])
+                        table_schema.pack_iter(data[table_name],
+                                               with_metadata)
                     )
         # Flip priority for the next load to maintain (rough)
         # parity with non-determinism of BigQuery's ANY_VALUE()

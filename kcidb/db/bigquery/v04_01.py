@@ -140,8 +140,8 @@ class Schema(PreviousSchema):
     )
 
     # A map of table names and their "primary key" fields
-    KEY_MAP = dict(
-        **PreviousSchema.KEY_MAP,
+    KEYS_MAP = dict(
+        **PreviousSchema.KEYS_MAP,
         issues=("id", "version",),
         incidents=("id",),
     )
@@ -242,6 +242,6 @@ class Schema(PreviousSchema):
         """
         assert isinstance(conn, cls.Connection)
         # Create new tables
-        for table_name, table_schema in cls.TABLE_MAP.items():
+        for table_name in cls.TABLE_MAP:
             if table_name not in PreviousSchema.TABLE_MAP:
-                cls._create_table(conn, table_name, table_schema)
+                cls._create_table(conn, table_name)
