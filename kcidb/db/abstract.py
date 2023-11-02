@@ -1,6 +1,7 @@
 """Kernel CI reporting database - abstract database definitions"""
 
 from abc import ABC, abstractmethod
+import datetime
 import kcidb.orm as orm
 from kcidb.misc import LIGHT_ASSERTS
 
@@ -77,6 +78,39 @@ class Driver(ABC):
         """
         assert self.is_initialized()
 
+    def purge(self, before):
+        """
+        Remove all the data from the database that arrived before the
+        specified time, if the database supports that.
+        The database must be initialized.
+
+        Args:
+            before: An "aware" datetime.datetime object specifying the
+                    the earliest (database server) time the data to be
+                    *preserved* should've arrived. Any other data will be
+                    purged.
+                    Can be None to have nothing removed. The latter can be
+                    used to test if the database supports purging.
+
+        Returns:
+            True if the database supports purging, and the requested data was
+            purged. False if the database doesn't support purging.
+        """
+        assert self.is_initialized()
+        assert before is None or \
+            isinstance(before, datetime.datetime) and before.tzinfo
+        return False
+
+    @abstractmethod
+    def get_current_time(self):
+        """
+        Get the current time from the database server.
+
+        Returns:
+            A timezone-aware datetime object representing the current
+            time on the database server.
+        """
+
     @abstractmethod
     def get_last_modified(self):
         """
@@ -137,7 +171,7 @@ class Driver(ABC):
             "Target schema is older than the current schema"
 
     @abstractmethod
-    def dump_iter(self, objects_per_report):
+    def dump_iter(self, objects_per_report, with_metadata):
         """
         Dump all data from the database in object number-limited chunks.
         The database must be initialized.
@@ -145,6 +179,8 @@ class Driver(ABC):
         Args:
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be dumped as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the current
@@ -153,10 +189,13 @@ class Driver(ABC):
         """
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
         assert self.is_initialized()
 
+    # We can live with this for now, pylint: disable=too-many-arguments
     @abstractmethod
-    def query_iter(self, ids, children, parents, objects_per_report):
+    def query_iter(self, ids, children, parents, objects_per_report,
+                   with_metadata):
         """
         Match and fetch objects from the database, in object number-limited
         chunks. The database must be initialized.
@@ -170,6 +209,8 @@ class Driver(ABC):
                                 matched as well.
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be fetched as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the current
@@ -182,6 +223,7 @@ class Driver(ABC):
                    for k, v in ids.items())
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
         assert self.is_initialized()
 
     @abstractmethod
@@ -203,17 +245,22 @@ class Driver(ABC):
         assert self.is_initialized()
 
     @abstractmethod
-    def load(self, data):
+    def load(self, data, with_metadata):
         """
         Load data into the database.
         The database must be initialized.
 
         Args:
-            data:   The JSON data to load into the database.
-                    Must adhere to the current database schema's version of
-                    the I/O schema.
+            data:           The JSON data to load into the database.
+                            Must adhere to the current database schema's
+                            version of the I/O schema.
+            with_metadata:  True if any metadata in the data should
+                            also be loaded into the database. False if it
+                            should be discarded and the database should
+                            generate its metadata itself.
         """
         assert self.is_initialized()
         io_schema = self.get_schema()[1]
         assert io_schema.is_compatible_directly(data)
         assert LIGHT_ASSERTS or io_schema.is_valid_exactly(data)
+        assert isinstance(with_metadata, bool)

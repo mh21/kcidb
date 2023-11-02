@@ -2,10 +2,13 @@
 
 import re
 import textwrap
+import time
 import datetime
 import json
+from copy import deepcopy
 from itertools import permutations
 import pytest
+import dateutil.parser
 import kcidb
 from kcidb.unittest import assert_executes
 
@@ -16,7 +19,7 @@ def test_schemas_main():
     """Check kcidb-db-schemas works"""
     argv = ["kcidb.db.schemas_main", "-d", "sqlite::memory:"]
     assert_executes("", *argv,
-                    stdout_re=r"4\.0: 4\.0\n4\.1: 4\.2\n")
+                    stdout_re=r"4\.0: 4\.0\n4\.1: 4\.2\n4\.2: 4\.3\n")
 
 
 def test_reset(clean_database):
@@ -158,7 +161,8 @@ def test_query_main():
                      incidents=["test:incident:1"]),
             parents=True,
             children=True,
-            objects_per_report=10
+            objects_per_report=10,
+            with_metadata=False
         )
         return status
     """)
@@ -201,7 +205,8 @@ def test_load_main():
         with patch("kcidb.db.Client", return_value=client) as Client:
             status = function()
         Client.assert_called_once_with("bigquery:project.dataset")
-        client.load.assert_called_once_with({repr(empty)})
+        client.load.assert_called_once_with({repr(empty)},
+                                            with_metadata=False)
         return status
     """)
     assert_executes(json.dumps(empty), *argv,
@@ -217,8 +222,10 @@ def test_load_main():
             status = function()
         Client.assert_called_once_with("bigquery:project.dataset")
         assert client.load.call_count == 2
-        client.load.assert_has_calls([call({repr(empty)}),
-                                      call({repr(empty)})])
+        client.load.assert_has_calls([
+            call({repr(empty)}, with_metadata=False),
+            call({repr(empty)}, with_metadata=False)
+        ])
         return status
     """)
     assert_executes(json.dumps(empty) + json.dumps(empty), *argv,
@@ -272,7 +279,7 @@ COMPREHENSIVE_IO_DATA = {
             origin="origin",
             comment="x86_64",
             start_time="2020-08-14T23:08:06.967000+00:00",
-            duration=600,
+            duration=600.0,
             architecture="x86_64",
             command="make",
             compiler="gcc",
@@ -318,7 +325,7 @@ COMPREHENSIVE_IO_DATA = {
             status="FAIL",
             waived=False,
             start_time="2020-08-14T23:08:07.967000+00:00",
-            duration=600,
+            duration=600.0,
             output_files=[
                 dict(name="foo.bar",
                      url="https://example.com/foo.bar"),
@@ -371,6 +378,19 @@ COMPREHENSIVE_IO_DATA = {
 }
 
 
+def test_get_current_time(clean_database):
+    """
+    Check get_current_time() works correctly
+    """
+    client = clean_database
+    timestamp = client.get_current_time()
+    assert timestamp is not None
+    assert isinstance(timestamp, datetime.datetime)
+    assert timestamp.tzinfo is not None
+    time.sleep(1)
+    assert client.get_current_time() > timestamp
+
+
 def test_get_last_modified(empty_database):
     """
     Check get_last_modified() works correctly
@@ -390,7 +410,97 @@ def test_all_fields(empty_database):
     io_data = COMPREHENSIVE_IO_DATA
     client = empty_database
     client.load(io_data)
-    assert io_data == client.dump()
+    assert io_data == client.dump(with_metadata=False)
+
+
+def test_metadata_generation_and_fetching(empty_database):
+    """
+    Check metadata generation and fetching works right.
+    """
+    client = empty_database
+    io_data = COMPREHENSIVE_IO_DATA
+    ids = {
+        obj_list_name: [obj["id"] for obj in io_data[obj_list_name]]
+        for obj_list_name in kcidb.io.SCHEMA.graph
+        if obj_list_name
+    }
+
+    # Check metadata is generated
+    before_load = client.get_current_time()
+    client.load(io_data)
+    after_load = client.get_current_time()
+    dump_with_metadata = client.dump()
+    dump_without_metadata = kcidb.io.SCHEMA.new()
+    for obj_list_name in kcidb.io.SCHEMA.graph:
+        if obj_list_name:
+            dump_without_metadata[obj_list_name] = []
+            for obj in dump_with_metadata[obj_list_name]:
+                assert "_timestamp" in obj
+                obj = obj.copy()
+                timestamp = dateutil.parser.isoparse(obj.pop("_timestamp"))
+                assert timestamp >= before_load
+                assert timestamp <= after_load
+                dump_without_metadata[obj_list_name].append(obj)
+    assert dump_without_metadata == io_data
+    assert client.dump(with_metadata=False) == dump_without_metadata
+
+    # Check queries can be done both with and without metadata
+    query_with_metadata = client.query(ids=ids, with_metadata=True)
+    query_without_metadata = kcidb.io.SCHEMA.new()
+    for obj_list_name in kcidb.io.SCHEMA.graph:
+        if obj_list_name:
+            query_without_metadata[obj_list_name] = []
+            for obj in query_with_metadata[obj_list_name]:
+                assert "_timestamp" in obj
+                obj = obj.copy()
+                timestamp = dateutil.parser.isoparse(obj.pop("_timestamp"))
+                assert timestamp >= before_load
+                assert timestamp <= after_load
+                query_without_metadata[obj_list_name].append(obj)
+    assert query_without_metadata == io_data
+    assert client.query(ids=ids, with_metadata=False) == \
+        query_without_metadata
+
+
+def test_metadata_ignoring_and_updating(empty_database):
+    """
+    Check metadata ignoring and updating works right.
+    """
+    client = empty_database
+
+    # Generate a dump with metadata
+    client.load(COMPREHENSIVE_IO_DATA)
+    dump_with_metadata = client.dump()
+    dump_without_metadata = client.dump(with_metadata=False)
+
+    # Check loaded metadata is ignored by default and new one is generated
+    before_later_load = client.get_current_time()
+    client.load(dump_with_metadata)
+    after_later_load = client.get_current_time()
+    later_dump_with_metadata = client.dump()
+    assert later_dump_with_metadata != dump_with_metadata
+    for obj_list_name in kcidb.io.SCHEMA.graph:
+        if obj_list_name:
+            for obj in later_dump_with_metadata[obj_list_name]:
+                assert "_timestamp" in obj
+                timestamp = dateutil.parser.isoparse(obj["_timestamp"])
+                assert timestamp >= before_later_load
+                assert timestamp <= after_later_load
+
+    # Empty the database
+    empty_database.empty()
+
+    # Check metadata can be loaded when requested
+    client.load(dump_with_metadata, with_metadata=True)
+    assert client.dump() == dump_with_metadata
+
+    # Check metadata can be overwritten
+    client.load(later_dump_with_metadata, with_metadata=True)
+    assert client.dump() == later_dump_with_metadata
+
+    # Check loading missing metadata has no effect
+    client.load(dump_without_metadata, with_metadata=True)
+    assert client.dump() == later_dump_with_metadata
 
 
 def test_upgrade(clean_database):
@@ -861,7 +971,7 @@ def test_upgrade(clean_database):
             assert database.oo_query(kcidb.orm.query.Pattern.parse(">*#")) == \
                 last_params["oo"]
             upgraded_io = io_version.upgrade(last_params["io"])
-            assert database.dump() == upgraded_io
+            assert database.dump(with_metadata=False) == upgraded_io
             assert database.query(io_version.get_ids(upgraded_io)) == \
                 upgraded_io
 
@@ -892,7 +1002,7 @@ def test_upgrade(clean_database):
 
             # Check we can query it in various ways
             upgraded_io = io_version.upgrade(load_params["io"])
-            assert database.dump() == upgraded_io
+            assert database.dump(with_metadata=False) == upgraded_io
             assert database.query(io_version.get_ids(upgraded_io)) == \
                 upgraded_io
             assert \
@@ -943,7 +1053,8 @@ def test_query(empty_database):
     assert client.query(ids=dict(checkouts=["_:1"]), children=True) in \
         [
             {
-                "version": {"major": 4, "minor": 2},
+                "version": {"major": kcidb.io.SCHEMA.major,
+                            "minor": kcidb.io.SCHEMA.minor},
                 "checkouts": [
                     {"id": "_:1", "origin": "_"}
                 ],
@@ -981,7 +1092,8 @@ def test_query(empty_database):
         ]
 
     unambigious_result = {
-        "version": {"major": 4, "minor": 2},
+        "version": {"major": kcidb.io.SCHEMA.major,
+                    "minor": kcidb.io.SCHEMA.minor},
         "checkouts": [
             {"id": "_:2", "origin": "_"}
         ],
@@ -1020,7 +1132,8 @@ def test_query(empty_database):
 
     assert client.query(ids=dict(incidents=["_:3"]), parents=True) == \
         {
-            "version": {"major": 4, "minor": 2},
+            "version": {"major": kcidb.io.SCHEMA.major,
+                        "minor": kcidb.io.SCHEMA.minor},
             "checkouts": [
                 {"id": "_:2", "origin": "_"}
             ],
@@ -1046,7 +1159,8 @@ def test_query(empty_database):
         }
 
     unambigious_result = {
-        "version": {"major": 4, "minor": 2},
+        "version": {"major": kcidb.io.SCHEMA.major,
+                    "minor": kcidb.io.SCHEMA.minor},
         "checkouts": [
             {"id": "_:2", "origin": "_"}
         ],
@@ -1099,7 +1213,7 @@ def test_test_status(empty_database):
             for status in status_set
         ]
     })
-    dump = client.dump()
+    dump = client.dump(with_metadata=False)
     assert status_set == set(test["id"][2:] for test in dump["tests"])
     assert status_set == set(test["status"] for test in dump["tests"])
 
@@ -1109,7 +1223,7 @@ def test_empty(empty_database):
     io_data = COMPREHENSIVE_IO_DATA
     client = empty_database
     client.load(io_data)
-    assert io_data == client.dump()
+    assert io_data == client.dump(with_metadata=False)
     client.empty()
     assert kcidb.io.SCHEMA.new() == client.dump()
 
@@ -1127,3 +1241,44 @@ def test_cleanup(clean_database):
     for version in reversed(list(client.get_schemas())[:-1]):
         client.init(version)
         client.cleanup()
+
+
+def test_purge(empty_database):
+    """Test the purge() method behaves as documented"""
+    client = empty_database
+
+    # If this is a database and schema which *should* support purging
+    if isinstance(client.driver, (kcidb.db.bigquery.Driver,
+                                  kcidb.db.postgresql.Driver,
+                                  kcidb.db.sqlite.Driver)) and \
+            client.driver.get_schema()[0] >= (4, 2):
+        io_data_1 = deepcopy(COMPREHENSIVE_IO_DATA)
+        io_data_2 = deepcopy(COMPREHENSIVE_IO_DATA)
+        for obj_list_name in kcidb.io.SCHEMA.graph:
+            if obj_list_name:
+                for obj in io_data_2[obj_list_name]:
+                    obj["id"] = "origin:2"
+
+        assert client.purge(None)
+        client.load(io_data_1)
+        assert client.dump(with_metadata=False) == io_data_1
+        after_first_load = client.get_current_time()
+        time.sleep(1)
+        client.load(io_data_2)
+
+        # Check both datasets are in the database
+        # regardless of the object order
+        dump = client.dump(with_metadata=False)
+        for io_data in (io_data_1, io_data_2):
+            for obj_list_name in kcidb.io.SCHEMA.graph:
+                if obj_list_name:
+                    assert obj_list_name in dump
+                    for obj in io_data[obj_list_name]:
+                        assert obj in dump[obj_list_name]
+
+        assert client.purge(after_first_load)
+        assert client.dump(with_metadata=False) == io_data_2
+        assert client.purge(client.get_current_time())
+        assert client.dump() == kcidb.io.SCHEMA.new()
+    else:
+        assert not client.purge(None)

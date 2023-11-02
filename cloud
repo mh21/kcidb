@@ -1322,6 +1322,7 @@ function cloud_function_deploy() {
         "cloud_functions.$name" deploy \
         mute gcloud functions deploy --quiet --project="$project" \
                                      --region="$CLOUD_FUNCTION_REGION" \
+                                     --docker-registry=artifact-registry \
                                      --source "$source" "${prefix}${name}" \
                                      --entry-point "kcidb_${name}" \
                                      "$@"
@@ -1489,7 +1490,7 @@ function cloud_functions_deploy() {
     cloud_function_deploy "$sections" "$source" "$project" "$prefix" \
                           pick_notifications \
                           --env-vars-file "$env_yaml_file" \
-                          --runtime python37 \
+                          --runtime python39 \
                           --trigger-topic "${pick_notifications_trigger_topic}" \
                           --memory 256MB \
                           --max-instances=1 \
@@ -1498,7 +1499,7 @@ function cloud_functions_deploy() {
     cloud_function_deploy "$sections" "$source" "$project" "$prefix" \
                           send_notification \
                           --env-vars-file "$env_yaml_file" \
-                          --runtime python37 \
+                          --runtime python39 \
                           --trigger-event "${trigger_event}" \
                           --trigger-resource "${trigger_resource}" \
                           --memory 256MB \
@@ -1509,7 +1510,7 @@ function cloud_functions_deploy() {
     cloud_function_deploy "$sections" "$source" "$project" "$prefix" \
                           spool_notifications \
                           --env-vars-file "$env_yaml_file" \
-                          --runtime python37 \
+                          --runtime python39 \
                           --trigger-topic "${updated_topic}" \
                           --memory 2048MB \
                           --max-instances=10 \
@@ -1518,7 +1519,7 @@ function cloud_functions_deploy() {
     cloud_function_deploy "$sections" "$source" "$project" "$prefix" \
                           "$cache_redirect_function_name" \
                           --env-vars-file "$env_yaml_file" \
-                          --runtime python37 \
+                          --runtime python39 \
                           --trigger-http \
                           --allow-unauthenticated \
                           --memory 256MB \
@@ -1528,7 +1529,7 @@ function cloud_functions_deploy() {
     cloud_function_deploy "$sections" "$source" "$project" "$prefix" \
                           cache_urls \
                           --env-vars-file "$env_yaml_file" \
-                          --runtime python37 \
+                          --runtime python39 \
                           --trigger-topic "${updated_urls_topic}" \
                           --memory 256MB \
                           --max-instances=1 \
@@ -1537,7 +1538,7 @@ function cloud_functions_deploy() {
     cloud_function_deploy "$sections" "$source" "$project" "$prefix" \
                           load_queue \
                           --env-vars-file "$env_yaml_file" \
-                          --runtime python37 \
+                          --runtime python39 \
                           --trigger-topic "${load_queue_trigger_topic}" \
                           --memory 1024MB \
                           --max-instances=1 \
