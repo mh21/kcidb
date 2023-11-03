@@ -10,7 +10,7 @@ import functions_framework
 import kcidb
 
 # Name of the Google Cloud project we're deployed in
-PROJECT_ID = os.environ["GCP_PROJECT"]
+PROJECT_ID = os.environ["GOOGLE_CLOUD_PROJECT"]
 
 kcidb.misc.logging_setup(
     kcidb.misc.LOGGING_LEVEL_MAP[os.environ.get("KCIDB_LOG_LEVEL", "NONE")]

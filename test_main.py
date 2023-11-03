@@ -32,7 +32,7 @@ def test_import():
             "--log-level=DEBUG"
         ])
     )
-    env["GCP_PROJECT"] = "TEST_PROJECT"
+    env["GOOGLE_CLOUD_PROJECT"] = "TEST_PROJECT"
 
     orig_env = dict(os.environ)
     try:
@@ -69,7 +69,7 @@ def test_url_caching(empty_deployment):
     assert empty_deployment is None
 
     client = kcidb.Client(
-        project_id=os.environ["GCP_PROJECT"],
+        project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
         topic_name=os.environ["KCIDB_LOAD_QUEUE_TOPIC"]
     )
 

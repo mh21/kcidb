@@ -349,12 +349,12 @@ def test_email_generated(empty_deployment):
 
 
     client = kcidb.Client(
-        project_id=os.environ["GCP_PROJECT"],
+        project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
         topic_name=os.environ["KCIDB_LOAD_QUEUE_TOPIC"]
     )
     db_client = db.Client(os.environ["KCIDB_DATABASE"])
     email_subscriber = kcidb.mq.EmailSubscriber(
-        os.environ["GCP_PROJECT"],
+        os.environ["GOOGLE_CLOUD_PROJECT"],
         os.environ["KCIDB_SMTP_TOPIC"],
         os.environ["KCIDB_SMTP_SUBSCRIPTION"]
     )

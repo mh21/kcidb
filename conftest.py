@@ -55,7 +55,7 @@ EMPTY_DATABASES = {
 def empty_deployment():
     """Reusable empty (no-data) deployment"""
     yield None
-    project = os.environ["GCP_PROJECT"]
+    project = os.environ["GOOGLE_CLOUD_PROJECT"]
     # Empty the load queue subscription
     topic = os.environ["KCIDB_LOAD_QUEUE_TOPIC"]
     subscription = os.environ["KCIDB_LOAD_QUEUE_SUBSCRIPTION"]
