@@ -2,6 +2,7 @@
 
 import inspect
 from abc import ABCMeta, ABC, abstractmethod
+import datetime
 import kcidb.io as io
 import kcidb.orm as orm
 from kcidb.db.misc import UnsupportedSchema
@@ -76,6 +77,16 @@ class Connection(ABC, metaclass=MetaConnection):
         Returns:
             The major and the minor version numbers of the database schema,
             or None, if not initialized.
+        """
+
+    @abstractmethod
+    def get_current_time(self):
+        """
+        Get the current time from the database server.
+
+        Returns:
+            A timezone-aware datetime object representing the current
+            time on the database server.
         """
 
     @abstractmethod
@@ -241,8 +252,30 @@ class Schema(ABC, metaclass=MetaSchema):
         The database must be initialized.
         """
 
+    def purge(self, before):
+        """
+        Remove all the data from the database that arrived before the
+        specified time, if the database supports that.
+        The database must be initialized.
+
+        Args:
+            before: An "aware" datetime.datetime object specifying the
+                    the earliest (database server) time the data to be
+                    *preserved* should've arrived. Any other data will be
+                    purged.
+                    Can be None to have nothing removed. The latter can be
+                    used to test if the database supports purging.
+
+        Returns:
+            True if the database supports purging, and the requested data was
+            purged. False if the database doesn't support purging.
+        """
+        assert before is None or \
+            isinstance(before, datetime.datetime) and before.tzinfo
+        return False
+
     @abstractmethod
-    def dump_iter(self, objects_per_report):
+    def dump_iter(self, objects_per_report, with_metadata):
         """
         Dump all data from the database in object number-limited chunks.
         The database must be initialized.
@@ -250,6 +283,8 @@ class Schema(ABC, metaclass=MetaSchema):
         Args:
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be dumped as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the current
@@ -258,9 +293,12 @@ class Schema(ABC, metaclass=MetaSchema):
         """
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
 
+    # We can live with this for now, pylint: disable=too-many-arguments
     @abstractmethod
-    def query_iter(self, ids, children, parents, objects_per_report):
+    def query_iter(self, ids, children, parents, objects_per_report,
+                   with_metadata):
         """
         Match and fetch objects from the database, in object number-limited
         chunks. The database must be initialized.
@@ -274,6 +312,8 @@ class Schema(ABC, metaclass=MetaSchema):
                                 matched as well.
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be fetched as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the current
@@ -288,6 +328,7 @@ class Schema(ABC, metaclass=MetaSchema):
         del parents
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
 
     @abstractmethod
     def oo_query(self, pattern_set):
@@ -307,14 +348,17 @@ class Schema(ABC, metaclass=MetaSchema):
                    for r in pattern_set)
 
     @abstractmethod
-    def load(self, data):
+    def load(self, data, with_metadata):
         """
         Load data into the database.
-        The database must be initialized.
 
         Args:
-            data:   The JSON data to load into the database.
-                    Must adhere to the schema's version of the I/O schema.
+            data:           The JSON data to load into the database. Must
+                            adhere to the schema's version of the I/O schema.
+            with_metadata:  True if any metadata in the data should
+                            also be loaded into the database. False if it
+                            should be discarded and the database should
+                            generate its metadata itself.
         """
         # Relying on the driver to check compatibility/validity
 
@@ -449,6 +493,39 @@ class Driver(AbstractDriver, metaclass=MetaDriver):
         assert self.is_initialized()
         self.schema.empty()
 
+    def purge(self, before):
+        """
+        Remove all the data from the database that arrived before the
+        specified time, if the database supports that.
+        The database must be initialized.
+
+        Args:
+            before: An "aware" datetime.datetime object specifying the
+                    the earliest (database server) time the data to be
+                    *preserved* should've arrived. Any other data will be
+                    purged.
+                    Can be None to have nothing removed. The latter can be
+                    used to test if the database supports purging.
+
+        Returns:
+            True if the database supports purging, and the requested data was
+            purged. False if the database doesn't support purging.
+        """
+        assert self.is_initialized()
+        assert before is None or \
+            isinstance(before, datetime.datetime) and before.tzinfo
+        return self.schema.purge(before)
+
+    def get_current_time(self):
+        """
+        Get the current time from the database server.
+
+        Returns:
+            A timezone-aware datetime object representing the current
+            time on the database server.
+        """
+        return self.conn.get_current_time()
+
     def get_last_modified(self):
         """
         Get the time the data in the driven database was last modified.
@@ -528,7 +605,7 @@ class Driver(AbstractDriver, metaclass=MetaDriver):
             self.conn.set_schema_version(schema.version)
             self.schema = schema(self.conn)
 
-    def dump_iter(self, objects_per_report):
+    def dump_iter(self, objects_per_report, with_metadata):
         """
         Dump all data from the database in object number-limited chunks.
         The database must be initialized.
@@ -536,6 +613,8 @@ class Driver(AbstractDriver, metaclass=MetaDriver):
         Args:
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be dumped as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the schema's
@@ -544,10 +623,13 @@ class Driver(AbstractDriver, metaclass=MetaDriver):
         """
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
         assert self.is_initialized()
-        return self.schema.dump_iter(objects_per_report)
+        return self.schema.dump_iter(objects_per_report, with_metadata)
 
-    def query_iter(self, ids, children, parents, objects_per_report):
+    # We can live with this for now, pylint: disable=too-many-arguments
+    def query_iter(self, ids, children, parents, objects_per_report,
+                   with_metadata):
         """
         Match and fetch objects from the database, in object number-limited
         chunks. The database must be initialized.
@@ -561,6 +643,8 @@ class Driver(AbstractDriver, metaclass=MetaDriver):
                                 matched as well.
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be fetched as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the schema's
@@ -574,8 +658,10 @@ class Driver(AbstractDriver, metaclass=MetaDriver):
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
         assert self.is_initialized()
+        assert isinstance(with_metadata, bool)
         return self.schema.query_iter(
-            ids, children, parents, objects_per_report
+            ids, children, parents, objects_per_report,
+            with_metadata=with_metadata
         )
 
     def oo_query(self, pattern_set):
@@ -596,16 +682,22 @@ class Driver(AbstractDriver, metaclass=MetaDriver):
         assert self.is_initialized()
         return self.schema.oo_query(pattern_set)
 
-    def load(self, data):
+    def load(self, data, with_metadata):
         """
         Load data into the database.
         The database must be initialized.
 
         Args:
-            data:   The JSON data to load into the database.
-                    Must adhere to the schema's version of the I/O schema.
+            data:           The JSON data to load into the database.
+                            Must adhere to the current database schema's
+                            version of the I/O schema.
+            with_metadata:  True if any metadata in the data should
+                            also be loaded into the database. False if it
+                            should be discarded and the database should
+                            generate its metadata itself.
         """
         assert self.is_initialized()
         assert self.schema.io.is_compatible_directly(data)
         assert LIGHT_ASSERTS or self.schema.io.is_valid_exactly(data)
-        self.schema.load(data)
+        assert isinstance(with_metadata, bool)
+        self.schema.load(data, with_metadata=with_metadata)
