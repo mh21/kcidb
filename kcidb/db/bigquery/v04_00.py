@@ -148,6 +148,18 @@ class Connection(AbstractConnection):
             return io.schema.V1.major, io.schema.V1.minor
         return None
 
+    def get_current_time(self):
+        """
+        Get the current time from the database server.
+
+        Returns:
+            A timezone-aware datetime object representing the current
+            time on the database server.
+        """
+        return next(iter(
+            self.query_create("SELECT CURRENT_TIMESTAMP").result()
+        ))[0]
+
     def get_last_modified(self):
         """
         Get the time the data in the connected database was last modified.
@@ -469,11 +481,15 @@ class Schema(AbstractSchema):
     )
 
     # A map of table names and their "primary key" fields
-    KEY_MAP = dict(
+    KEYS_MAP = dict(
         checkouts=("id",),
         builds=("id",),
         tests=("id",),
     )
+
+    # A map of table names to the dictionary of fields and the names of their
+    # aggregation function, if any (the default is "ANY_VALUE").
+    AGGS_MAP = dict()
 
     # Queries for each type of raw object-oriented data
     OO_QUERIES = dict(
@@ -571,34 +587,52 @@ class Schema(AbstractSchema):
     )
 
     @classmethod
-    def _create_table(cls, conn, table_name, table_schema):
+    def _format_view_query(cls, conn, name):
+        """
+        Format the view query for a table.
+
+        Args:
+            conn:   The connection to the dataset to format the query for.
+            name:   Name of the table to format the view query for.
+        """
+        assert isinstance(conn, cls.Connection)
+        assert isinstance(name, str)
+        assert name in cls.TABLE_MAP
+        schema = cls.TABLE_MAP[name]
+        keys = cls.KEYS_MAP[name]
+        aggs = cls.AGGS_MAP.get(name, {})
+        table_ref = conn.dataset_ref.table("_" + name)
+        return (
+            "SELECT " +
+            ", ".join(
+                f"`{n}`" if n in keys
+                else f"{aggs.get(n, 'ANY_VALUE')}(`{n}`) AS `{n}`"
+                for n in (f.name for f in schema)
+            ) +
+            f" FROM `{table_ref}` GROUP BY " +
+            ", ".join(keys)
+        )
+
+    @classmethod
+    def _create_table(cls, conn, name):
         """
         Create a table and its view.
 
         Args:
-            conn:           The connection to create the table with.
-            table_name:     Name of the table being created.
-            table_schema:   Schema of the table being created.
+            conn:   The connection to create the table with.
+            name:   Name of the table being created.
         """
         assert isinstance(conn, cls.Connection)
-        assert isinstance(table_name, str)
-        assert isinstance(table_schema, list)
+        assert isinstance(name, str)
+        assert name in cls.TABLE_MAP
         # Create raw table with duplicate records
-        table_ref = conn.dataset_ref.table("_" + table_name)
-        table = bigquery.table.Table(table_ref, schema=table_schema)
+        table_ref = conn.dataset_ref.table("_" + name)
+        table = bigquery.table.Table(table_ref, schema=cls.TABLE_MAP[name])
         conn.client.create_table(table)
         # Create a view deduplicating the table records
-        view_ref = conn.dataset_ref.table(table_name)
+        view_ref = conn.dataset_ref.table(name)
         view = bigquery.table.Table(view_ref)
-        view.view_query = \
-            "SELECT " + \
-            ", ".join(
-                f"`{n}`" if n in cls.KEY_MAP[table_name]
-                else f"ANY_VALUE(`{n}`) AS `{n}`"
-                for n in (f.name for f in table_schema)
-            ) + \
-            f" FROM `{table_ref}` GROUP BY " + \
-            ", ".join(cls.KEY_MAP[table_name])
+        view.view_query = cls._format_view_query(conn, name)
         conn.client.create_table(view)
 
     def init(self):
@@ -606,8 +640,8 @@ class Schema(AbstractSchema):
         Initialize the database. The database must be uninitialized.
         """
         # Create tables and corresponding views
-        for table_name, table_schema in self.TABLE_MAP.items():
-            self._create_table(self.conn, table_name, table_schema)
+        for table_name in self.TABLE_MAP:
+            self._create_table(self.conn, table_name)
 
     def cleanup(self):
         """
@@ -671,13 +705,15 @@ class Schema(AbstractSchema):
                     node[key] = cls._unpack_node(value)
         return node
 
-    def dump_iter(self, objects_per_report):
+    def dump_iter(self, objects_per_report, with_metadata):
         """
         Dump all data from the database in object number-limited chunks.
 
         Args:
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be dumped as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the I/O version
@@ -686,11 +722,18 @@ class Schema(AbstractSchema):
         """
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
 
         obj_num = 0
         data = self.io.new()
-        for obj_list_name in self.TABLE_MAP:
-            query_string = f"SELECT * FROM `{obj_list_name}`"
+        for obj_list_name, table_schema in self.TABLE_MAP.items():
+            query_string = \
+                "SELECT " + \
+                ", ".join(
+                    f"`{f.name}`" for f in table_schema
+                    if with_metadata or f.name[0] != '_'
+                ) + \
+                f" FROM `{obj_list_name}`"
             query_job = self.conn.query_create(query_string)
             obj_list = None
             for row in query_job:
@@ -712,7 +755,9 @@ class Schema(AbstractSchema):
             assert LIGHT_ASSERTS or self.io.is_valid_exactly(data)
             yield data
 
-    def query_iter(self, ids, children, parents, objects_per_report):
+    # We can live with this for now, pylint: disable=too-many-arguments
+    def query_iter(self, ids, children, parents, objects_per_report,
+                   with_metadata):
         """
         Match and fetch objects from the database, in object number-limited
         chunks.
@@ -726,6 +771,8 @@ class Schema(AbstractSchema):
                                 matched as well.
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be fetched as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the I/O version
@@ -740,6 +787,7 @@ class Schema(AbstractSchema):
                    for k, v in ids.items())
         assert isinstance(objects_per_report, int)
         assert objects_per_report >= 0
+        assert isinstance(with_metadata, bool)
 
         # A dictionary of object list names and two-element lists,
         # containing a SELECT statement (returning IDs of the objects to
@@ -806,7 +854,12 @@ class Schema(AbstractSchema):
         for obj_list_name, query in obj_list_queries.items():
             query_parameters = query[1]
             query_string = \
-                f"SELECT * FROM `{obj_list_name}` INNER JOIN (\n" + \
+                "SELECT " + \
+                ", ".join(
+                    f"`{f.name}`" for f in self.TABLE_MAP[obj_list_name]
+                    if with_metadata or f.name[0] != '_'
+                ) + \
+                f" FROM `{obj_list_name}` INNER JOIN (\n" + \
                 textwrap.indent(query[0], " " * 4) + \
                 ") USING(id)\n"
             query_job = self.conn.query_create(query_string, query_parameters)
@@ -956,13 +1009,15 @@ class Schema(AbstractSchema):
         return objs
 
     @classmethod
-    def _pack_node(cls, node):
+    def _pack_node(cls, node, with_metadata):
         """
         Pack a loaded data node (and all its children) to
         the BigQuery storage-compatible representation.
 
         Args:
-            node:   The node to pack.
+            node:           The node to pack.
+            with_metadata:  True, if meta fields (with leading underscore "_")
+                            should be preserved. False, if omitted.
 
         Returns:
             The packed node.
@@ -970,36 +1025,48 @@ class Schema(AbstractSchema):
         if isinstance(node, list):
             node = node.copy()
             for index, value in enumerate(node):
-                node[index] = cls._pack_node(value)
+                node[index] = cls._pack_node(value, with_metadata)
         elif isinstance(node, dict):
             node = node.copy()
             for key, value in list(node.items()):
                 # Flatten the "misc" fields
                 if key == "misc":
                     node[key] = json.dumps(value)
+                # Remove masked metadata
+                elif key.startswith('_') and not with_metadata:
+                    del node[key]
+                # Pack everything else
                 else:
-                    node[key] = cls._pack_node(value)
+                    node[key] = cls._pack_node(value, with_metadata)
         return node
 
-    def load(self, data):
+    def load(self, data, with_metadata):
         """
         Load data into the database.
 
         Args:
-            data:   The JSON data to load into the database.
-                    Must adhere to the I/O version of the database schema.
+            data:           The JSON data to load into the database. Must
+                            adhere to the I/O version of the database schema.
+            with_metadata:  True if any metadata in the data should
+                            also be loaded into the database. False if it
+                            should be discarded and the database should
+                            generate its metadata itself.
         """
         assert self.io.is_compatible_directly(data)
         assert LIGHT_ASSERTS or self.io.is_valid_exactly(data)
+        assert isinstance(with_metadata, bool)
 
         # Load the data
         for obj_list_name, table_schema in self.TABLE_MAP.items():
             if obj_list_name in data:
-                obj_list = self._pack_node(data[obj_list_name])
+                obj_list = self._pack_node(data[obj_list_name], with_metadata)
                 if not LIGHT_ASSERTS:
                     validate_json_obj_list(table_schema, obj_list)
-                job_config = bigquery.job.LoadJobConfig(autodetect=False,
-                                                        schema=table_schema)
+                job_config = bigquery.job.LoadJobConfig(
+                    autodetect=False,
+                    schema=[f for f in table_schema
+                            if with_metadata or not f.name.startswith("_")]
+                )
                 job = self.conn.client.load_table_from_json(
                     obj_list,
                     self.conn.dataset_ref.table("_" + obj_list_name),
