@@ -106,6 +106,16 @@ class Driver(AbstractDriver):
         The database must be initialized.
         """
 
+    def get_current_time(self):
+        """
+        Get the current time from the database server.
+
+        Returns:
+            A timezone-aware datetime object representing the current
+            time on the database server.
+        """
+        return datetime.datetime.now(datetime.timezone.utc)
+
     def get_last_modified(self):
         """
         Get the time the data in the driven database was last modified.
@@ -119,13 +129,15 @@ class Driver(AbstractDriver):
         """
         return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
 
-    def dump_iter(self, objects_per_report):
+    def dump_iter(self, objects_per_report, with_metadata):
         """
         Dump all data from the database in object number-limited chunks.
 
         Args:
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be dumped as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the current I/O
@@ -136,7 +148,8 @@ class Driver(AbstractDriver):
         yield io.SCHEMA.new()
 
     # We can live with this for now, pylint: disable=too-many-arguments
-    def query_iter(self, ids, children, parents, objects_per_report):
+    def query_iter(self, ids, children, parents, objects_per_report,
+                   with_metadata):
         """
         Match and fetch objects from the database, in object number-limited
         chunks.
@@ -151,13 +164,15 @@ class Driver(AbstractDriver):
                                 matched as well.
             objects_per_report: An integer number of objects per each returned
                                 report data, or zero for no limit.
+            with_metadata:      True, if metadata fields should be fetched as
+                                well. False, if not.
 
         Returns:
             An iterator returning report JSON data adhering to the current I/O
             schema version, each containing at most the specified number of
             objects.
         """
-        del ids, children, parents, objects_per_report
+        del ids, children, parents, objects_per_report, with_metadata
         yield io.SCHEMA.new()
 
     def oo_query(self, pattern_set):
@@ -174,11 +189,16 @@ class Driver(AbstractDriver):
         del pattern_set
         return {}
 
-    def load(self, data):
+    def load(self, data, with_metadata):
         """
         Load data into the database.
 
         Args:
-            data:   The JSON data to load into the database.
-                    Must adhere to the current version of I/O schema.
+            data:           The JSON data to load into the database.
+                            Must adhere to the current database schema's
+                            version of the I/O schema.
+            with_metadata:  True if any metadata in the data should
+                            also be loaded into the database. False if it
+                            should be discarded and the database should
+                            generate its metadata itself.
         """
